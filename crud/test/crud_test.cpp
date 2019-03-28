@@ -20,6 +20,7 @@
 #include <mocks/mock_pbft_base.hpp>
 #include <mocks/mock_boost_asio_beast.hpp>
 #include <algorithm>
+#include <boost/random/mersenne_twister.hpp>
 
 using namespace ::testing;
 
@@ -2442,6 +2443,19 @@ TEST(crud, test_that_delete_db_with_incorrect_bluzelle_key_fails_to_validate)
                 }));
         crud->handle_request("NOT_caller_id", msg, session);
     }
+}
+
+TEST(crud, test_assumption_that_boost_random_mt19937_produces_the_same_values_for_a_given_seed) {
+    // This test is only to validate the assumption that mt19937 behaves the same on multiple operating systems. The
+    // actual values were created on macOS Mojave with boost 1.68.0. If this test ever fails the developers need to be
+    // told immediately
+    const uint64_t seed{2615920895};
+    std::vector<size_t> accepted_random_integers{3140953273, 904689470, 787640056, 3844470742, 600053064, 1112679107, 1028106211, 3757839055, 148540127, 2741460015};
+    std::vector<size_t> actual_random_integers;
+    actual_random_integers.resize(10,0);
+    boost::random::mt19937 mt(seed); // mt19937 chosen because it is fast
+    std::for_each(actual_random_integers.begin(), actual_random_integers.end(), [&](auto& val){ val = mt(); });
+    ASSERT_EQ(actual_random_integers, accepted_random_integers);
 }
 
 
