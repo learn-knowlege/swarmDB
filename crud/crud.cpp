@@ -16,6 +16,8 @@
 #include <utils/make_endpoint.hpp>
 #include <boost/algorithm/string/trim_all.hpp>
 #include <boost/lexical_cast.hpp>
+#include <boost/random/uniform_int_distribution.hpp>
+#include <boost/random/mersenne_twister.hpp>
 
 using namespace bzn;
 using namespace std::placeholders;
@@ -207,6 +209,27 @@ crud::handle_create(const bzn::caller_id_t& caller_id, const database_msg& reque
                 this->send_response(request, bzn::storage_result::delete_pending, database_response(), session);
 
                 return;
+            }
+
+
+
+            // TODO: result of a merge need to use operation_exceeds_available_space
+            if (this->uses_random_eviction_policy(perms))  // KEP-1299
+            {
+                const auto [keys, size] = this->storage->get_size(request.header().db_uuid());
+                const uint64_t new_db_size = size + (request.create().key().length() + request.create().value().length());
+                const uint64_t max_db_size{this->max_database_size(perms)};
+                if (new_db_size > max_db_size)
+                {
+                    // we need to remove one or more key/value pairs to make room for the new one
+                    boost::random::mt19937 mt(12345); // TODO: use sequence number
+                    boost::random::uniform_int_distribution<> dist(0, keys - 1);
+                    auto key_index = dist(mt);
+                    auto key_to_evict = this->storage->get_keys(request.header().db_uuid())[key_index];
+                    // TODO: use the storage result to tell the user if the eviction was successful
+                    // TODO: revmoving just one pair may not make enough room, may need to remove many
+                    /*storage_result res =*/ this->storage->remove(request.header().db_uuid(), key_to_evict);
+                }
             }
 
             if (this->operation_exceeds_available_space(request, perms))
@@ -845,6 +868,20 @@ crud::is_caller_a_writer(const bzn::caller_id_t& caller_id, const Json::Value& p
     }
 
     return this->is_caller_owner(caller_id, perms);
+}
+
+
+bool
+crud::uses_random_eviction_policy(const Json::Value& perms) const
+{
+    return perms[EVICTION_POLICY_KEY] == database_create_db_eviction_policy_type_RANDOM;
+}
+
+
+uint64_t
+crud::max_database_size(const Json::Value& perms) const
+{
+    return boost::lexical_cast<uint64_t>(perms[MAX_SIZE_KEY]);
 }
 
 

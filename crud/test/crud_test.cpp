@@ -21,6 +21,8 @@
 #include <mocks/mock_boost_asio_beast.hpp>
 #include <algorithm>
 #include <boost/random/mersenne_twister.hpp>
+#include <boost/random/uniform_int_distribution.hpp>
+#include <boost/format.hpp>
 
 using namespace ::testing;
 
@@ -112,6 +114,124 @@ namespace
 
                 additional_checks(resp);
             }));
+    }
+
+    std::shared_ptr<bzn::crud>
+    initialize_crud(std::shared_ptr<bzn::Mocksession_base>& session)
+    {
+        auto mock_subscription_manager = std::make_shared<NiceMock<bzn::Mocksubscription_manager_base>>();
+        auto mock_io_context = std::make_shared<NiceMock<bzn::asio::Mockio_context_base>>();
+        session = std::make_shared<bzn::Mocksession_base>();
+
+        EXPECT_CALL(*mock_io_context, make_unique_steady_timer()).WillOnce(Invoke(
+                [&]()
+                {
+                    return std::make_unique<NiceMock<bzn::asio::Mocksteady_timer_base>>();
+                }));
+
+        auto crud = std::make_shared<bzn::crud>(mock_io_context, std::make_shared<bzn::mem_storage>(), mock_subscription_manager, nullptr, "caller_id");
+
+        auto mock_pbft = std::make_shared<bzn::Mockpbft_base>();
+
+        EXPECT_CALL(*mock_pbft,
+                    current_peers_ptr()).WillRepeatedly(Return(std::make_shared<const std::vector<bzn::peer_address_t>>()));
+        crud->start(mock_pbft);
+        return crud;
+    }
+
+    void
+    create_test_database(const std::shared_ptr<bzn::crud>& crud, const std::shared_ptr<bzn::Mocksession_base>& session, const bzn::uuid_t& caller_uuid, const bzn::uuid_t& db_uuid, uint64_t max_size, database_create_db_eviction_policy_type eviction_policy = database_create_db_eviction_policy_type_NONE)
+    {
+        database_msg msg;
+        msg.mutable_header()->set_db_uuid(db_uuid);
+        msg.mutable_header()->set_nonce(uint64_t(123));
+        msg.mutable_create_db()->set_max_size(max_size);
+        msg.mutable_create_db()->set_eviction_policy(eviction_policy);
+
+        EXPECT_CALL(*session, send_signed_message(_)).WillOnce(Invoke(
+                [=](std::shared_ptr<bzn_envelope> env)
+                {
+                    database_response resp;
+                    resp.ParseFromString(env->database_response());
+                    EXPECT_EQ(database_response::ResponseCase::RESPONSE_NOT_SET,resp.response_case());
+                    EXPECT_EQ("", resp.error().message());
+                }));
+        crud->handle_request(caller_uuid, msg, session);
+    }
+
+
+    void
+    remove_test_database(const std::shared_ptr<bzn::crud>& crud, const std::shared_ptr<bzn::Mocksession_base>& session, const bzn::uuid_t& db_uuid, const bzn::uuid_t& caller_uuid)
+    {
+        database_msg msg;
+        msg.mutable_header()->set_db_uuid(db_uuid);
+        msg.mutable_header()->set_nonce(uint64_t(123));
+
+        msg.mutable_delete_db();
+        EXPECT_CALL(*session, send_signed_message(_)).WillOnce(Invoke(
+                [=](std::shared_ptr<bzn_envelope> /*env*/)
+                {
+                }));
+        crud->handle_request(caller_uuid, msg, session);
+
+    }
+
+
+    void
+    create_key_value(const std::shared_ptr<bzn::crud>& crud, const std::shared_ptr<bzn::Mocksession_base>& session, const bzn::uuid_t& caller, const bzn::uuid_t& db, const std::string& key, const std::string& value )
+    {
+        database_msg msg;
+        msg.mutable_header()->set_point_of_contact(caller);
+        msg.mutable_header()->set_db_uuid(db);
+        msg.mutable_header()->set_nonce(uint64_t(123));
+        msg.mutable_create()->set_key(key);
+        msg.mutable_create()->set_value(value);
+        crud->handle_request(caller, msg, session);
+    }
+
+
+    std::pair<std::size_t, std::size_t>
+    get_database_size(const std::shared_ptr<bzn::crud>& crud, const std::shared_ptr<bzn::Mocksession_base>& session, const bzn::uuid_t& db)
+    {
+        std::promise<std::pair<std::size_t, std::size_t>> db_size_promise;
+        database_msg msg;
+        msg.mutable_header()->set_db_uuid(db);
+        msg.mutable_header()->set_nonce(uint64_t(123));
+        msg.mutable_size();
+        EXPECT_CALL(*session, send_signed_message(_)).WillOnce(Invoke(
+                [&](const std::shared_ptr<bzn_envelope>& env)
+                {
+                    database_response resp;
+                    resp.ParseFromString(env->database_response());
+                    db_size_promise.set_value(std::pair<std::size_t, std::size_t>{resp.size().keys(), resp.size().bytes()});
+                }));
+        std::future<std::pair<std::size_t, std::size_t>> future = db_size_promise.get_future();
+        crud->handle_request("", msg, session);
+        return future.get();
+    }
+
+
+    std::set<std::string>
+    get_database_keys(const std::shared_ptr<bzn::crud>& crud, const std::shared_ptr<bzn::Mocksession_base>& session, const bzn::uuid_t& caller_id, const bzn::uuid_t& db_uuid)
+    {
+        database_msg msg;
+        std::promise<std::set<std::string>> keys_promise;
+
+        msg.mutable_header()->set_point_of_contact(caller_id);
+        msg.mutable_header()->set_db_uuid(db_uuid);
+        msg.mutable_header()->set_nonce(uint64_t(123));
+        msg.mutable_keys();
+
+        expect_signed_response(session, db_uuid, uint64_t(123), database_response::kKeys, std::nullopt,
+                               [&](const auto& resp)
+                               {
+                                   std::set<std::string> tmp_set(resp.keys().keys().begin(), resp.keys().keys().end());
+                                   keys_promise.set_value(tmp_set);
+                               });
+
+        std::future<std::set<std::string>> future = keys_promise.get_future();
+        crud->handle_request(db_uuid, msg, session);
+        return future.get();
     }
 }
 
@@ -2445,16 +2565,18 @@ TEST(crud, test_that_delete_db_with_incorrect_bluzelle_key_fails_to_validate)
     }
 }
 
+
 TEST(crud, test_assumption_that_boost_random_mt19937_produces_the_same_values_for_a_given_seed) {
     // This test is only to validate the assumption that mt19937 behaves the same on multiple operating systems. The
     // actual values were created on macOS Mojave with boost 1.68.0. If this test ever fails the developers need to be
     // told immediately
+    const uint64_t KEY_COUNT{422};
     const uint64_t seed{2615920895};
-    std::vector<size_t> accepted_random_integers{3140953273, 904689470, 787640056, 3844470742, 600053064, 1112679107, 1028106211, 3757839055, 148540127, 2741460015};
-    std::vector<size_t> actual_random_integers;
-    actual_random_integers.resize(10,0);
+    boost::random::uniform_int_distribution<> dist(0, KEY_COUNT - 1);
+    std::vector<size_t> accepted_random_integers{308, 88, 77, 377, 58, 109, 101, 369, 14, 269};
+    std::vector<size_t> actual_random_integers(10,0);
     boost::random::mt19937 mt(seed); // mt19937 chosen because it is fast
-    std::for_each(actual_random_integers.begin(), actual_random_integers.end(), [&](auto& val){ val = mt(); });
+    std::for_each(actual_random_integers.begin(), actual_random_integers.end(), [&](auto& val){ val = dist(mt); });
     ASSERT_EQ(actual_random_integers, accepted_random_integers);
 }
 
@@ -2519,4 +2641,79 @@ TEST(crud, test_that_create_and_updates_which_exceed_db_limit_send_proper_respon
 
     expect_signed_response(session, "uuid", uint64_t(123), database_response::kError);
     crud->handle_request("caller_id", msg, session);
+}
+
+
+
+TEST(crud, test_random_eviction_policy_randomly_removes_a_key_value_pair)
+{
+    const u_int64_t MAX_SIZE{1024};
+    const bzn::uuid_t DB_UUID{"sut"};
+    const bzn::uuid_t CALLER_UUID{"caller_id"};
+
+    std::shared_ptr<bzn::Mocksession_base> session;
+    auto crud = initialize_crud(session);
+
+    remove_test_database(crud, session, DB_UUID, CALLER_UUID);
+
+    create_test_database(crud, session, CALLER_UUID, DB_UUID, MAX_SIZE, database_create_db_eviction_policy_type_RANDOM);
+
+
+    // now we have a cache with random eviction and max size 1024 bytes, let's fill up the database to just under the
+    // limit
+    {
+        EXPECT_CALL(*session, send_signed_message(_)).WillRepeatedly(Invoke(
+                [=](std::shared_ptr<bzn_envelope> env)
+                {
+                    database_response resp;
+                    resp.ParseFromString(env->database_response());
+                    EXPECT_EQ(database_response::ResponseCase::RESPONSE_NOT_SET,resp.response_case());
+                    EXPECT_EQ("", resp.error().message());
+                }));
+
+        for (auto index = 0; index<35; ++index)
+        {
+            create_key_value(crud, session, CALLER_UUID, DB_UUID, str(boost::format("key%04d") % index), "a very precise string.");
+        }
+    }
+
+    {
+        // did the keys get in there? And are we one key/pair away from oveflowing the database?
+        const auto [keys, size] = get_database_size(crud, session, DB_UUID);
+        ASSERT_EQ( uint32_t(35), keys);
+        ASSERT_EQ( uint32_t(1015), size);
+        ASSERT_LE(MAX_SIZE-size, size_t(29));
+    }
+
+    const std::set<std::string> pre_eviction_keys{get_database_keys(crud, session, CALLER_UUID, DB_UUID)};
+
+    // lets add one more key, to push the storage over the top. There should not be an error, one of the existing keys
+    // should simply be evicted to make room for the new key.
+    EXPECT_CALL(*session, send_signed_message(_)).WillOnce(Invoke(
+            [=](std::shared_ptr<bzn_envelope> env)
+            {
+                database_response resp;
+                resp.ParseFromString(env->database_response());
+                EXPECT_EQ(database_response::ResponseCase::RESPONSE_NOT_SET,resp.response_case());
+                EXPECT_EQ("", resp.error().message());
+            }));
+
+    create_key_value(crud, session, CALLER_UUID, DB_UUID, str(boost::format("key%04d") % 37), "a very precise string.");
+    // after 1 replacement the number of keys must be the same, and, in this case, the size of the database must be
+    // the same.
+    {
+        const auto [keys, size] = get_database_size(crud, session, DB_UUID);
+        ASSERT_EQ( uint32_t(35), keys);
+        ASSERT_EQ( uint32_t(1015), size);
+    }
+    // so we must compare the actual set of keys, there must be a difference of one key
+    std::set<std::string> post_eviction_keys{get_database_keys(crud, session, CALLER_UUID, DB_UUID)};
+    std::set<std::string> difference;
+
+    std::set_difference(pre_eviction_keys.begin(), pre_eviction_keys.end(), post_eviction_keys.begin(), post_eviction_keys.end(), std::inserter(difference, difference.begin()));
+
+    ASSERT_EQ(size_t(1), difference.size());
+
+    // Clean up after ourselves
+    remove_test_database(crud, session, DB_UUID, CALLER_UUID);
 }

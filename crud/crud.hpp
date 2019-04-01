@@ -22,6 +22,7 @@
 #include <pbft/pbft_base.hpp>
 #include <storage/storage_base.hpp>
 #include <shared_mutex>
+#include <gtest/gtest_prod.h>
 
 
 namespace bzn
@@ -73,6 +74,8 @@ namespace bzn
         bool is_caller_a_writer(const bzn::caller_id_t& caller_id, const Json::Value& perms) const;
         void add_writers(const database_msg& request, Json::Value& perms);
         void remove_writers(const database_msg& request, Json::Value& perms);
+        bool uses_random_eviction_policy(const Json::Value& perms) const;
+        uint64_t max_database_size(const Json::Value& perms) const;
         bool operation_exceeds_available_space(const database_msg& request, const Json::Value& perms);
 
         // expiration...
