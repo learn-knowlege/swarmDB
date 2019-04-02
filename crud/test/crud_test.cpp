@@ -2612,7 +2612,8 @@ TEST(crud, test_that_delete_db_with_incorrect_bluzelle_key_fails_to_validate)
 }
 
 
-TEST(crud, test_assumption_that_boost_random_mt19937_produces_the_same_values_for_a_given_seed) {
+TEST(crud, test_assumption_that_boost_random_mt19937_produces_the_same_values_for_a_given_seed)
+{
     // This test is only to validate the assumption that mt19937 behaves the same on multiple operating systems. The
     // actual values were created on macOS Mojave with boost 1.68.0. If this test ever fails the developers need to be
     // told immediately
@@ -2693,47 +2694,53 @@ TEST(crud, test_that_create_and_updates_which_exceed_db_limit_send_proper_respon
 TEST(crud, test_random_eviction_policy_randomly_removes_a_key_value_pair)
 {
     const auto make_key = [](uint16_t index){return str(boost::format("key%04d") % index);};
-    const u_int64_t MAX_SIZE{1024};
+    const bzn::value_t TEST_VALUE{"This is a very long string to use as a test value..."};
+    const u_int64_t MAX_SIZE{8096};
     const bzn::uuid_t DB_UUID{"sut_uuid"};
     const bzn::uuid_t CALLER_UUID{"caller_id"};
 
     std::shared_ptr<bzn::Mocksession_base> session;
     std::shared_ptr<bzn::Mocknode_base> mock_node;
 
-    auto crud = initialize_crud(session, mock_node, CALLER_UUID);
+    auto crud{initialize_crud(session, mock_node, CALLER_UUID)};
     remove_test_database(crud, session, mock_node, CALLER_UUID, DB_UUID);
     create_test_database(crud, session, mock_node, CALLER_UUID, DB_UUID, MAX_SIZE, database_create_db_eviction_policy_type_RANDOM);
 
-    // now we have a cache with random eviction and max size 1024 bytes, let's fill up the database to just under the
-    // limit
-    for (auto index = 0; index<35; ++index)
+    // We have a cache with random eviction and max size MAX_SIZE bytes, fill up the database to just under the limit
+    size_t index{0};
+    size_t total_used{0};
+    bzn::key_t key;
+    while(total_used < MAX_SIZE)
     {
-        create_key_value(crud, session, mock_node, CALLER_UUID, DB_UUID, make_key(index), "a very precise string.");
+        key = make_key(index);
+        create_key_value(crud, session, mock_node, CALLER_UUID, DB_UUID, key, TEST_VALUE);
+        total_used += key.length() + TEST_VALUE.length();
+        index++;
     }
 
     {
         // did the keys get in there? And are we one key/pair away from overflowing the database?
-        const auto [keys, size] = get_database_size(crud, session, mock_node, CALLER_UUID, DB_UUID);
-        ASSERT_EQ( uint32_t(35), keys);
-        ASSERT_EQ( uint32_t(1015), size);
-        ASSERT_LE(MAX_SIZE-size, size_t(29));
+        const auto [keys, size]{get_database_size(crud, session, mock_node, CALLER_UUID, DB_UUID)};
+        ASSERT_EQ( uint32_t(index-1), keys);
+        ASSERT_EQ( uint32_t(keys * (key.length() + TEST_VALUE.length())), size);
+        ASSERT_LE(MAX_SIZE-size, key.length() + TEST_VALUE.length());
     }
 
     const std::set<std::string> pre_eviction_keys{get_database_keys(crud, session, mock_node, CALLER_UUID, DB_UUID)};
 
-    // lets add one more key, to push the storage over the top. There should not be an error, one of the existing keys
-    // should simply be evicted to make room for the new key.
-    create_key_value(crud, session, mock_node, CALLER_UUID, DB_UUID, make_key(37), "a very precise string.");
+    // Add one more key, to push the storage over the top, this is a cache, so there will be no error, simply an
+    // eviction of an existing key
+    create_key_value(crud, session, mock_node, CALLER_UUID, DB_UUID, make_key(index), TEST_VALUE);
 
-    // after 1 replacement the number of keys must be the same, and, in this case, the size of the database must be
-    // the same.
+    // After 1 replacement the number of keys must be the same, and, in this case, the size of the database must be the
+    // same.
     {
-        const auto [keys, size] = get_database_size(crud, session, mock_node, CALLER_UUID, DB_UUID);
-        ASSERT_EQ( uint32_t(35), keys);
-        ASSERT_EQ( uint32_t(1015), size);
+        const auto [keys, size]{get_database_size(crud, session, mock_node, CALLER_UUID, DB_UUID)};
+        ASSERT_EQ( uint32_t(index-1), keys);
+        ASSERT_EQ( keys * (key.length() + TEST_VALUE.length()), size);
     }
 
-    // so we must compare the actual set of keys, there must be a difference of one key
+    // Compare the post eviction set of keys to the pre eviction set of keys, there should be a difference of one key
     std::set<std::string> post_eviction_keys{get_database_keys(crud, session, mock_node, CALLER_UUID, DB_UUID)};
 
     std::set<std::string> difference;
@@ -2741,12 +2748,98 @@ TEST(crud, test_random_eviction_policy_randomly_removes_a_key_value_pair)
 
     ASSERT_EQ(size_t(1), difference.size());
 
-    // Clean up after ourselves
+    // Clean up by removing the test database
     remove_test_database(crud, session, mock_node, DB_UUID, CALLER_UUID);
 }
 
 
 TEST(crud, test_random_eviction_policy_with_large_value_requiring_many_evictions)
 {
+    const auto make_key = [](uint16_t index){return str(boost::format("key%04d") % index);};
+    const bzn::value_t TEST_VALUE{"This is a very long string to use as a test value..."};
+    const bzn::value_t LARGE_TEST_VALUE{TEST_VALUE + TEST_VALUE + TEST_VALUE + TEST_VALUE + TEST_VALUE + TEST_VALUE + TEST_VALUE + TEST_VALUE};
+    const u_int64_t MAX_SIZE{8096};
+    const bzn::uuid_t DB_UUID{"sut_uuid"};
+    const bzn::uuid_t CALLER_UUID{"caller_id"};
 
+    std::shared_ptr<bzn::Mocksession_base> session;
+    std::shared_ptr<bzn::Mocknode_base> mock_node;
+
+    auto crud{initialize_crud(session, mock_node, CALLER_UUID)};
+    remove_test_database(crud, session, mock_node, CALLER_UUID, DB_UUID);
+    create_test_database(crud, session, mock_node, CALLER_UUID, DB_UUID, MAX_SIZE, database_create_db_eviction_policy_type_RANDOM);
+
+    // We have a cache with random eviction and max size MAX_SIZE bytes, fill up the database to just under the limit
+    size_t index{0};
+    size_t total_used{0};
+    bzn::key_t key;
+    while(total_used < MAX_SIZE)
+    {
+        key = make_key(index);
+        create_key_value(crud, session, mock_node, CALLER_UUID, DB_UUID, key, TEST_VALUE);
+        total_used += key.length() + TEST_VALUE.length();
+        index++;
+    }
+
+    const std::set<std::string> pre_eviction_keys{get_database_keys(crud, session, mock_node, CALLER_UUID, DB_UUID)};
+
+    // The cache is now less than one TEST_VALUE from its max storage limit. Add a very large value to ensure that
+    // enough key/value pairs are removed to make room for the new key/value pair
+    create_key_value(crud, session, mock_node, CALLER_UUID, DB_UUID, make_key(index), LARGE_TEST_VALUE);
+
+    // Compare the actual set of keys, there must be a difference of more than one key
+    std::set<std::string> post_eviction_keys{get_database_keys(crud, session, mock_node, CALLER_UUID, DB_UUID)};
+
+    {
+        const auto [keys, size]{get_database_size(crud, session, mock_node, CALLER_UUID, DB_UUID)};
+        ASSERT_LE(size, MAX_SIZE);
+        // NOTE: The following may not always be the case, in this instance, however, since the database contained
+        // key/value pairs of the same size, it works out.
+        ASSERT_LE(MAX_SIZE - size, ( key.length() + LARGE_TEST_VALUE.length()));
+    }
+
+    std::set<std::string> difference;
+    std::set_difference(pre_eviction_keys.begin(), pre_eviction_keys.end(), post_eviction_keys.begin(), post_eviction_keys.end(), std::inserter(difference, difference.begin()));
+    ASSERT_TRUE(difference.size() > 1);
+}
+
+
+TEST(crud, test_random_eviction_policy_edge_case_of_value_larger_than_max)
+{
+    const auto make_key = [](uint16_t index){return str(boost::format("key%04d") % index);};
+    const auto make_value = [](size_t size){return std::string(size,'X');};
+    const uint64_t MAX_SIZE{8096};
+    const bzn::value_t TOO_LARGE_TEST_VALUE{make_value(MAX_SIZE)};
+
+    const bzn::uuid_t DB_UUID{"sut_uuid"};
+    const bzn::uuid_t CALLER_UUID{"caller_id"};
+    const uint64_t NONCE{123};
+
+    std::shared_ptr<bzn::Mocksession_base> session;
+    std::shared_ptr<bzn::Mocknode_base> mock_node;
+
+    auto crud{initialize_crud(session, mock_node, CALLER_UUID)};
+    remove_test_database(crud, session, mock_node, CALLER_UUID, DB_UUID);
+    create_test_database(crud, session, mock_node, CALLER_UUID, DB_UUID, MAX_SIZE, database_create_db_eviction_policy_type_RANDOM);
+
+
+    database_msg msg;
+    msg.mutable_header()->set_point_of_contact(CALLER_UUID);
+    msg.mutable_header()->set_db_uuid(DB_UUID);
+    msg.mutable_header()->set_nonce(NONCE);
+    msg.mutable_create()->set_key(make_key(0));
+    msg.mutable_create()->set_value(make_value(MAX_SIZE));
+
+    // In this case we expect a db_full error as the key/value pair is larger than the storage limit.
+    expect_signed_response(session
+            , DB_UUID
+            , NONCE
+            , database_response::kError
+            , bzn::storage_result_msg.at(bzn::storage_result::db_full));
+
+    EXPECT_CALL(*mock_node, send_signed_message(A<const std::string&>(),_));
+
+    crud->handle_request(CALLER_UUID, msg, session);
+
+    remove_test_database(crud, session, mock_node, CALLER_UUID, DB_UUID);
 }

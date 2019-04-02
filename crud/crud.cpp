@@ -213,17 +213,38 @@ crud::handle_create(const bzn::caller_id_t& caller_id, const database_msg& reque
 
             if (this->operation_exceeds_available_space(request, perms))
             {
-                if (this->uses_random_eviction_policy(perms))  // KEP-1299
+                const auto key_value_size{request.create().key().length() + request.create().value().length()};
+                const auto max_size{boost::lexical_cast<uint64_t>(perms[MAX_SIZE_KEY])};
+
+                // Bail if the size of the key/value pair is larger than the database!
+                if (key_value_size < max_size && this->uses_random_eviction_policy(perms))
                 {
-                    const auto [keys, size] = this->storage->get_size(request.header().db_uuid());
+                    const auto [keys, size]{this->storage->get_size(request.header().db_uuid())};
+
+                    // How much space needs to be freed?
+                    int64_t storage_to_free = key_value_size - (max_size - size);
+
                     // we need to remove one or more key/value pairs to make room for the new one
                     boost::random::mt19937 mt(12345); // TODO: use sequence number
                     boost::random::uniform_int_distribution<> dist(0, keys - 1);
-                    auto key_index = dist(mt);
-                    auto key_to_evict = this->storage->get_keys(request.header().db_uuid())[key_index];
-                    // TODO: use the storage result to tell the user if the eviction was successful
-                    // TODO: removing just one pair may not make enough room, may need to remove many
-                    /*storage_result res =*/ this->storage->remove(request.header().db_uuid(), key_to_evict);
+                    std::vector<bzn::key_t> keys_to_evict{};
+
+                    const auto available_keys = this->storage->get_keys(request.header().db_uuid());
+                    while(0 <= storage_to_free)
+                    {
+                        auto key_index = dist(mt);
+                        auto key_to_evict = this->storage->get_keys(request.header().db_uuid())[key_index];
+                        if(keys_to_evict.end() == std::find(keys_to_evict.begin(), keys_to_evict.end(), key_to_evict))
+                        {
+                            const auto pair_size = this->storage->get_key_size(request.header().db_uuid(), key_to_evict);
+                            if (pair_size)
+                            {
+                                keys_to_evict.emplace_back(key_to_evict);
+                                this->storage->remove(request.header().db_uuid(), key_to_evict);
+                                storage_to_free -= *pair_size;
+                            }
+                        }
+                    }
                 }
                 else
                 {
