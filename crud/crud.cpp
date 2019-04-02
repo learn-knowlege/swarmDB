@@ -211,42 +211,36 @@ crud::handle_create(const bzn::caller_id_t& caller_id, const database_msg& reque
                 return;
             }
 
-
-
-            // TODO: result of a merge need to use operation_exceeds_available_space
-            if (this->uses_random_eviction_policy(perms))  // KEP-1299
+            if (this->operation_exceeds_available_space(request, perms))
             {
-                const auto [keys, size] = this->storage->get_size(request.header().db_uuid());
-                const uint64_t new_db_size = size + (request.create().key().length() + request.create().value().length());
-                const uint64_t max_db_size{this->max_database_size(perms)};
-                if (new_db_size > max_db_size)
+                if (this->uses_random_eviction_policy(perms))  // KEP-1299
                 {
+                    const auto [keys, size] = this->storage->get_size(request.header().db_uuid());
                     // we need to remove one or more key/value pairs to make room for the new one
                     boost::random::mt19937 mt(12345); // TODO: use sequence number
                     boost::random::uniform_int_distribution<> dist(0, keys - 1);
                     auto key_index = dist(mt);
                     auto key_to_evict = this->storage->get_keys(request.header().db_uuid())[key_index];
                     // TODO: use the storage result to tell the user if the eviction was successful
-                    // TODO: revmoving just one pair may not make enough room, may need to remove many
+                    // TODO: removing just one pair may not make enough room, may need to remove many
                     /*storage_result res =*/ this->storage->remove(request.header().db_uuid(), key_to_evict);
                 }
-            }
-
-            if (this->operation_exceeds_available_space(request, perms))
-            {
-                result = bzn::storage_result::db_full;
-            }
-            else
-            {
-                result = this->storage->create(request.header().db_uuid(), request.create().key(), request.create().value());
-
-                if (result == bzn::storage_result::ok)
+                else
                 {
-                    this->update_expiration_entry(request.header().db_uuid(), request.create().key(),
+                    this->send_response(request, bzn::storage_result::db_full, database_response(), session);
+
+                    return ;
+                }
+            }
+
+            result = this->storage->create(request.header().db_uuid(), request.create().key(), request.create().value());
+
+            if (result == bzn::storage_result::ok)
+            {
+                this->update_expiration_entry(request.header().db_uuid(), request.create().key(),
                         request.create().expire());
 
-                    this->subscription_manager->inspect_commit(request);
-                }
+                this->subscription_manager->inspect_commit(request);
             }
         }
     }
